@@ -703,6 +703,11 @@
 						currentAction.reset();
 						currentAction.play();
 						setStatus(`播放中 (${vrmaAnimationClip.duration.toFixed(1)}秒)`, true);
+
+						// 播放时自动收起工具面板，不遮挡主界面
+						if (menuOpen) {
+							toggleMenu();
+						}
 					} catch (error) {
 						console.error('Error playing animation:', error);
 						setStatus('播放出错');
