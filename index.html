@@ -219,6 +219,12 @@
 				background: linear-gradient(145deg, #6a82fb, #fc5c7d);
 				box-shadow: 0 0 12px rgba(106, 130, 251, 0.5);
 			}
+			.vrma-btn-dance {
+				background: linear-gradient(145deg, #e74c3c, #c0392b) !important;
+			}
+			.vrma-btn-dance.selected {
+				background: linear-gradient(145deg, #6a82fb, #fc5c7d) !important;
+			}
 
 			/* ===== 播放控制按钮 ===== */
 			.playback-controls {
@@ -377,7 +383,17 @@
 					<button class="vrma-btn" data-index="9" disabled>惊讶</button>
 					<button class="vrma-btn" data-index="10" disabled>思考</button>
 					<button class="vrma-btn" data-index="11" disabled>舞蹈 Bling</button>
+					<button class="vrma-btn vrma-btn-dance" data-index="12" disabled>🍶 酒醉的蝴蝶</button>
 				</div>
+				<label class="upload-btn" for="vmdFileInput" style="margin-top:10px">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+						<polyline points="17 8 12 3 7 8"/>
+						<line x1="12" y1="3" x2="12" y2="15"/>
+					</svg>
+					<span>导入 VMD 动作</span>
+					<input type="file" id="vmdFileInput" accept=".vmd" />
+				</label>
 			</div>
 
 			<!-- 播放控制 -->
@@ -430,6 +446,7 @@
 			const backdrop = document.getElementById('backdrop');
 			const modelSelector = document.getElementById('modelSelector');
 			const vrmFileInput = document.getElementById('vrmFileInput');
+			const vmdFileInput = document.getElementById('vmdFileInput');
 			const vrmaButtons = document.querySelectorAll('.vrma-btn');
 			const playBtn = document.getElementById('playBtn');
 			const pauseBtn = document.getElementById('pauseBtn');
@@ -442,6 +459,11 @@
 			let currentAction = undefined;
 			let vrmaAnimationClip = undefined;
 			let selectedVrmaIndex = -1;
+
+			// 标记 VMD 按钮的 index（13th button, 0-based = 12）
+			const VMD_BUTTON_INDEX = 12;
+			// 内置 VMD 文件路径
+			const VMD_BUILTIN_PATH = './VMD/兰若酒醉的蝴蝶mmd数据.vmd';
 
 			// ===== 内置模型列表 =====
 			const builtInModels = [
@@ -460,7 +482,7 @@
 			// ===== Three.js 设置 =====
 			const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 			renderer.setSize(window.innerWidth, window.innerHeight);
-			renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 限制像素比以提升移动端性能
+			renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 			renderer.outputColorSpace = THREE.SRGBColorSpace;
 			document.body.appendChild(renderer.domElement);
 
@@ -472,7 +494,6 @@
 			controls.target.set(0.0, 1.0, 0.0);
 			controls.update();
 
-			// 移动端触摸优化
 			controls.enableDamping = true;
 			controls.dampingFactor = 0.08;
 			controls.touches = {
@@ -490,7 +511,6 @@
 			const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
 			scene.add(ambientLight);
 
-			// 网格地面
 			const gridHelper = new THREE.GridHelper(10, 10, 0x444466, 0x333355);
 			scene.add(gridHelper);
 
@@ -514,6 +534,7 @@
 				'./VRMA/Surprised.vrma',
 				'./VRMA/Thinking.vrma',
 				'./VRMA/Bling-Bang-Bang-Born.vrma',
+				// index 12: VMD 格式，走转换管线
 			];
 
 			// ===== UI 工具函数 =====
@@ -545,7 +566,6 @@
 				controlsPanel.classList.toggle('open', menuOpen);
 				backdrop.classList.toggle('show', menuOpen);
 				menuToggle.classList.toggle('active', menuOpen);
-				// 切换图标
 				if (menuOpen) {
 					menuIcon.innerHTML = '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>';
 				} else {
@@ -579,7 +599,6 @@
 
 							if (currentVrm) {
 								scene.remove(currentVrm.scene);
-								// three-vrm v3 中 VRM 对象没有 dispose()，手动释放资源
 								currentVrm.scene.traverse((obj) => {
 									if (obj.geometry) obj.geometry.dispose();
 									if (obj.material) {
@@ -602,7 +621,6 @@
 							currentAction = undefined;
 							selectedVrmaIndex = -1;
 
-							// 重置动画按钮选中状态
 							vrmaButtons.forEach(btn => btn.classList.remove('selected'));
 
 							updateButtons();
@@ -627,7 +645,123 @@
 				});
 			}
 
-			// ===== VRMA 动画加载 =====
+			// ===== VMD → VRMA 转换管线 =====
+			let vmdConversionModules = null;
+			async function loadVMDConversionModules() {
+				if (vmdConversionModules) return vmdConversionModules;
+				const [mmdparser, vmdToBVH, BVHLoader, convertBVHToVRMAnimation] = await Promise.all([
+					import('./libs/mmdparser.module.js'),
+					import('./libs/VMD_to_BVH.js'),
+					import('./libs/BVHLoader.js'),
+					import('./libs/convertBVHToVRMAnimation.js'),
+				]);
+				vmdConversionModules = { mmdparser, vmdToBVH, BVHLoader, convertBVHToVRMAnimation };
+				return vmdConversionModules;
+			}
+
+			/**
+			 * 将 VMD 文件二进制数据转换为 VRMA 格式并加载
+			 * @param {ArrayBuffer} vmdBuffer - VMD 文件二进制数据
+			 * @param {number} btnIndex - 按钮索引
+			 */
+			async function loadVMDAsVRMA(vmdBuffer, btnIndex) {
+				if (!currentVrm) {
+					setStatus('请先加载模型');
+					return;
+				}
+
+				showLoading('正在转换 VMD → VRMA...');
+				setStatus('VMD 转换中...', true);
+
+				try {
+					// 1) 加载转换模块
+					const { mmdparser, vmdToBVH, BVHLoader, convertBVHToVRMAnimation } = await loadVMDConversionModules();
+
+					// 2) 解析 VMD 二进制
+					const parser = new mmdparser.Parser();
+					const vmdData = parser.parseVmd(vmdBuffer);
+					console.log('VMD parsed:', vmdData);
+
+					// 3) VMD → BVH 文本
+					const bvhText = vmdToBVH.vmdToBVH(vmdData, currentVrm, {
+						fps: 30,
+						scale: 0.1,
+					});
+
+					// 4) BVH 文本 → parsed { skeleton, clip }
+					const bvhLoader = new BVHLoader.BVHLoader();
+					const bvh = bvhLoader.parse(bvhText);
+					console.log('BVH parsed:', bvh);
+
+					// 5) BVH → VRMA buffer (GLB 二进制)
+					const vrmaBuffer = await convertBVHToVRMAnimation.convertBVHToVRMAnimation(bvh, {
+						scale: 0.01,
+					});
+					console.log('VRMA buffer:', vrmaBuffer.byteLength, 'bytes');
+
+					// 6) 加载 VRMA buffer
+					const blob = new Blob([vrmaBuffer], { type: 'application/octet-stream' });
+					const blobUrl = URL.createObjectURL(blob);
+
+					// 复用现有的 loadVRMA 加载逻辑
+					await new Promise((resolve, reject) => {
+						loader.load(
+							blobUrl,
+							(gltf) => {
+								const vrmAnimationData = gltf.userData.vrmAnimations && gltf.userData.vrmAnimations[0];
+								if (vrmAnimationData) {
+									const clip = createVRMAnimationClip(vrmAnimationData, currentVrm);
+									if (clip) {
+										if (currentAction) {
+											currentAction.stop();
+											currentAction = undefined;
+										}
+										vrmaAnimationClip = clip;
+										selectedVrmaIndex = btnIndex;
+
+										vrmaButtons.forEach((btn, i) => {
+											btn.classList.toggle('selected', i === btnIndex);
+										});
+
+										hideLoading();
+										setStatus('VMD 转换成功！点击播放');
+										updateButtons();
+										resolve(clip);
+									} else {
+										hideLoading();
+										setStatus('无法创建动画');
+										reject(new Error('Cannot create clip'));
+									}
+								} else {
+									hideLoading();
+									setStatus('VRMA 数据无效');
+									reject(new Error('No VRMA data'));
+								}
+							},
+							(progress) => {
+								if (progress.total > 0) {
+									const percent = (100.0 * (progress.loaded / progress.total)).toFixed(0);
+									loadingText.textContent = `正在加载 VRMA... ${percent}%`;
+								}
+							},
+							(error) => {
+								hideLoading();
+								setStatus('VRMA 加载失败');
+								reject(error);
+							}
+						);
+					});
+
+					URL.revokeObjectURL(blobUrl);
+
+				} catch (error) {
+					console.error('VMD conversion error:', error);
+					hideLoading();
+					setStatus('VMD 转换失败: ' + (error.message || error));
+				}
+			}
+
+			// ===== VRMA 动画加载（仅标准 VRMA） =====
 			async function loadVRMA(url, btnIndex) {
 				if (!currentVrm) {
 					setStatus('请先加载模型');
@@ -646,7 +780,6 @@
 								const clip = createVRMAnimationClip(vrmAnimationData, currentVrm);
 
 								if (clip) {
-									// 停止当前动画
 									if (currentAction) {
 										currentAction.stop();
 										currentAction = undefined;
@@ -655,7 +788,6 @@
 									vrmaAnimationClip = clip;
 									selectedVrmaIndex = btnIndex;
 
-									// 更新选中状态
 									vrmaButtons.forEach((btn, i) => {
 										btn.classList.toggle('selected', i === btnIndex);
 									});
@@ -691,6 +823,26 @@
 				});
 			}
 
+			// ===== 统一动画加载入口 =====
+			async function loadAnimation(btnIndex) {
+				if (btnIndex === VMD_BUTTON_INDEX) {
+					// 内置 VMD 动作：先 fetch VMD 文件，再转换
+					setStatus('正在加载酒醉舞蹈 VMD...', true);
+					try {
+						const resp = await fetch(VMD_BUILTIN_PATH);
+						if (!resp.ok) throw new Error('VMD 文件未找到: ' + VMD_BUILTIN_PATH);
+						const vmdBuffer = await resp.arrayBuffer();
+						await loadVMDAsVRMA(vmdBuffer, btnIndex);
+					} catch (error) {
+						console.error('Failed to load built-in VMD:', error);
+						hideLoading();
+						setStatus('加载酒醉舞蹈失败: ' + error.message);
+					}
+				} else {
+					await loadVRMA(VRMA_ANIMATION_URLS[btnIndex], btnIndex);
+				}
+			}
+
 			// ===== 动画控制 =====
 			function playAnimation() {
 				if (currentVrm && vrmaAnimationClip && currentMixer) {
@@ -706,7 +858,6 @@
 						currentAction.play();
 						setStatus(`播放中 (${vrmaAnimationClip.duration.toFixed(1)}秒)`, true);
 
-						// 播放时自动收起工具面板，不遮挡主界面
 						if (menuOpen) {
 							toggleMenu();
 						}
@@ -753,10 +904,10 @@
 
 			// ===== 事件监听 =====
 
-			// 动画按钮
+			// 动画按钮 — 统一处理 VRMA 和 VMD
 			vrmaButtons.forEach((button, index) => {
 				button.addEventListener('click', async () => {
-					await loadVRMA(VRMA_ANIMATION_URLS[index], index);
+					await loadAnimation(index);
 				});
 			});
 
@@ -771,7 +922,7 @@
 				await loadVRM(url);
 			});
 
-			// 本地文件上传
+			// 本地 VRM 文件上传
 			vrmFileInput.addEventListener('change', async (e) => {
 				const file = e.target.files[0];
 				if (!file) return;
@@ -779,7 +930,6 @@
 				const url = URL.createObjectURL(file);
 				const optionName = `本地: ${file.name}`;
 
-				// 添加到选择器
 				const option = document.createElement('option');
 				option.value = url;
 				option.textContent = optionName;
@@ -787,6 +937,21 @@
 				modelSelector.value = url;
 
 				await loadVRM(url);
+			});
+
+			// 本地 VMD 文件上传 — 直接转换并播放
+			vmdFileInput.addEventListener('change', async (e) => {
+				const file = e.target.files[0];
+				if (!file) return;
+
+				const vmdBuffer = await file.arrayBuffer();
+				setStatus(`正在转换: ${file.name}...`, true);
+
+				// 使用最后一个按钮（酒醉的蝴蝶）的样式
+				vrmaButtons.forEach(btn => btn.classList.remove('selected'));
+				vrmaButtons[VMD_BUTTON_INDEX].classList.add('selected');
+
+				await loadVMDAsVRMA(vmdBuffer, VMD_BUTTON_INDEX);
 			});
 
 			// 窗口大小调整
@@ -817,7 +982,6 @@
 			animate();
 
 			// ===== 初始化 =====
-			// 探测自定义模型是否存在，存在则添加到选择器
 			async function probeCustomModels() {
 				for (const model of customModels) {
 					try {
@@ -830,12 +994,11 @@
 							console.log('Found custom model:', model.name);
 						}
 					} catch {
-						// 模型不存在，跳过
+						// skip
 					}
 				}
 			}
 
-			// 启动
 			(async () => {
 				await probeCustomModels();
 				await loadVRM('./VRM/sample.vrm');
